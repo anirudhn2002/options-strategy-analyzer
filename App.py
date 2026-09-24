@@ -267,7 +267,6 @@ def stats_table(series, spot):
             "Breakevens": ", ".join(f"${b:,.2f}" for b in bes) if bes else "None",
             "Max Profit": fmt_money(mp),
             "Max Loss": fmt_money(ml),
-            f"P&L if expires at spot (${spot:,.2f})": f"${float(payoff_of(s['comps'], [spot])[0]):,.2f}",
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
@@ -320,11 +319,12 @@ def render_payoff_chart(x, series, layout_mode, spot, strikes, chart_key, height
         for i, s in enumerate(series):
             ax = "" if i == 0 else str(i + 1)
             top = 1 - i * (h + gap)
-            fig.update_layout(**{f"yaxis{ax}": dict(domain=[top - h, top], tickprefix="$", zeroline=True,
+            dom = [round(max(0.0, top - h), 6), round(min(1.0, top), 6)]  # clamp float error (e.g. -8e-17) into [0, 1]
+            fig.update_layout(**{f"yaxis{ax}": dict(domain=dom, tickprefix="$", zeroline=True,
                                                     zerolinecolor="rgba(200,200,200,0.6)", zerolinewidth=1.5)})
             _add_fill(fig, x, s["y"], s["name"], yaxis="y" + ax)
             _add_line(fig, x, s, yaxis="y" + ax)
-            fig.add_annotation(text=f"<b>{s['name']}</b>", xref="paper", yref="paper", x=0.005, y=top,
+            fig.add_annotation(text=f"<b>{s['name']}</b>", xref="paper", yref="paper", x=0.005, y=dom[1],
                                xanchor="left", yanchor="top", showarrow=False, font=dict(color=s["color"], size=13))
         fig.update_layout(height=max(260 * n + 60, 450), hoversubplots="axis", showlegend=False,
                           xaxis=dict(anchor=f"y{n}"))
@@ -677,11 +677,32 @@ if ticker:
                "your fill prices, not today's quotes. Same expiry as selected above, per-option basis. "
                "The combined lines add the new legs from the builder above (priced at today's bid/ask).")
 
-    n_held = st.number_input("How many existing positions?", min_value=0, value=1, step=1, key="held_n")
-
     held_comps, held_missing_px = [], []
     held_delta, held_open_pnl = 0.0, 0.0
     held_iv_issue = []
+
+    st.markdown("##### Underlying I already hold")
+    u1, u2, u3 = st.columns([1, 1, 2])
+    u_shares = u1.number_input(
+        "Shares held (negative = short)", value=0.0, step=0.05, format="%.4f", key="held_stock_shares",
+        help="Per-option basis, same units as Hedge Shares (0.5 = 50 shares per contract). "
+             "Positive = long stock, negative = short stock.")
+    u_px = u2.number_input("Average price (per share)", min_value=0.0, value=None, step=0.01, format="%.2f",
+                           key="held_stock_px", placeholder="your average price")
+    stock_held = []
+    if u_shares != 0:
+        if u_px is None:
+            u3.warning("Enter the average price of your shares to include them.")
+        else:
+            stock_held = [stock_comp(u_shares, u_px)]
+            held_delta += u_shares
+            held_open_pnl += u_shares * (S - u_px)
+            u3.metric("Shares Open P&L (at spot)", f"${u_shares * (S - u_px):,.2f}",
+                      help="Marked at today's spot. At expiry the shares are worth the expiry price, "
+                           "which is what the chart below plots.")
+
+    st.markdown("##### Options I already hold")
+    n_held = st.number_input("How many existing option positions?", min_value=0, value=1, step=1, key="held_n")
 
     for row_idx in range(0, int(n_held), 4):
         cols = st.columns(4)
@@ -698,16 +719,13 @@ if ticker:
                 if f"held_{i}_strike" not in st.session_state: st.session_state[f"held_{i}_strike"] = closest_strike_all
                 if f"held_{i}_qty" not in st.session_state: st.session_state[f"held_{i}_qty"] = 0.0
 
-                h_type = st.selectbox("Type", ["Call", "Put", "Stock"], key=f"held_{i}_type")
+                if st.session_state[f"held_{i}_type"] not in ("Call", "Put"): st.session_state[f"held_{i}_type"] = "Call"
+                h_type = st.selectbox("Type", ["Call", "Put"], key=f"held_{i}_type")
                 h_side = st.selectbox("Action", ["Short", "Long"], key=f"held_{i}_side")
-                if h_type != "Stock":
-                    h_k = st.selectbox("Strike", all_strikes, key=f"held_{i}_strike")
-                else:
-                    h_k = None
+                h_k = st.selectbox("Strike", all_strikes, key=f"held_{i}_strike")
                 h_px = st.number_input("Your entry price (per share)", min_value=0.0, value=None, step=0.01,
                                        format="%.2f", key=f"held_{i}_px", placeholder="your fill price")
-                h_qty = st.number_input("Quantity" if h_type != "Stock" else "Shares (per-option basis)",
-                                        min_value=0.0, step=1.0, format="%.2f", key=f"held_{i}_qty")
+                h_qty = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f", key=f"held_{i}_qty")
 
                 if h_qty <= 0:
                     continue
@@ -715,31 +733,28 @@ if ticker:
                     held_missing_px.append(i + 1)
                     continue
                 sign = 1 if h_side == "Long" else -1
-                if h_type == "Stock":
-                    held_comps.append({"kind": "stock", "k": None, "sign": sign, "qty": float(h_qty), "entry": float(h_px)})
-                    held_delta += sign * h_qty
-                    held_open_pnl += sign * h_qty * (S - h_px)
-                    st.caption(f"Open P&L now: \\${sign * h_qty * (S - h_px):,.2f}")
-                else:
-                    opt = h_type.lower()
-                    df = calls if h_type == "Call" else puts
-                    row = df[df['strike'] == h_k]
-                    held_comps.append({"kind": opt, "k": float(h_k), "sign": sign, "qty": float(h_qty), "entry": float(h_px)})
-                    if row.empty:
-                        held_iv_issue.append(i + 1)
-                        continue
-                    row = row.iloc[0]
-                    qt = quote(row)
-                    iv, _src = iv_with_fallback(qt["mid"], row, S, h_k, T, r, q, opt)
-                    if iv is None:
-                        held_iv_issue.append(i + 1)
-                    held_delta += sign * h_qty * calculate_delta(S, h_k, T, r, q, iv, opt)
-                    pos_pnl = sign * h_qty * (qt["mid"] - h_px)
-                    held_open_pnl += pos_pnl
-                    st.caption(f"Mark (mid): \\${qt['mid']:.2f} · Open P&L: \\${pos_pnl:,.2f}")
+                opt = h_type.lower()
+                df = calls if h_type == "Call" else puts
+                row = df[df['strike'] == h_k]
+                held_comps.append({"kind": opt, "k": float(h_k), "sign": sign, "qty": float(h_qty), "entry": float(h_px)})
+                if row.empty:
+                    held_iv_issue.append(i + 1)
+                    continue
+                row = row.iloc[0]
+                qt = quote(row)
+                iv, _src = iv_with_fallback(qt["mid"], row, S, h_k, T, r, q, opt)
+                if iv is None:
+                    held_iv_issue.append(i + 1)
+                held_delta += sign * h_qty * calculate_delta(S, h_k, T, r, q, iv, opt)
+                pos_pnl = sign * h_qty * (qt["mid"] - h_px)
+                held_open_pnl += pos_pnl
+                st.caption(f"Mark (mid): \\${qt['mid']:.2f} · Open P&L: \\${pos_pnl:,.2f}")
 
     if held_missing_px:
         st.warning(f"Enter your entry price for position(s) {', '.join(map(str, held_missing_px))} to include them.")
+
+    held_opts = held_comps
+    held_comps = held_opts + stock_held
 
     if held_comps:
         book_delta = held_delta + net_delta_real
@@ -748,7 +763,7 @@ if ticker:
         st.markdown("<hr>", unsafe_allow_html=True)
         h1, h2, h3, h4, h5 = st.columns(5)
         h1.metric("Open P&L (at current mid)", f"${held_open_pnl:,.2f}")
-        h2.metric("Net Delta (Existing)", f"{held_delta:.4f}")
+        h2.metric("Net Delta (Existing, incl. shares)", f"{held_delta:.4f}")
         h3.metric("Net Delta (Existing + New)", f"{book_delta:.4f}")
         h4.metric("Hedge Shares (Existing + New)", f"{book_hedge:.4f}")
         book_custom = h5.number_input("Custom shares for combined book", value=0.0, step=0.05, format="%.4f",
@@ -758,6 +773,7 @@ if ticker:
             st.caption(f"⚠️ Position(s) {', '.join(map(str, held_iv_issue))}: no usable IV, so delta for those is treated as 0.")
 
         plus_new = " + New Legs" if new_comps else ""
+        existing_name = "Existing Positions (options + shares)" if (stock_held and held_opts) else "Existing Positions"
         book_lines = {
             "Existing Positions": (held_comps, dict(color="#FFB300", width=3)),
             f"Existing{plus_new} + Delta Hedge": (held_comps + new_comps + [stock_comp(book_hedge, S)],
@@ -772,15 +788,18 @@ if ticker:
                 "Existing + New Legs": (held_comps + new_comps, dict(color="#29B6F6", width=3)),
                 **{k: v for k, v in book_lines.items() if k != "Existing Positions"},
             }
+        if stock_held and held_opts:  # let you see what your shares do to the options
+            book_lines = {"Existing Options Only": (held_opts, dict(color="#FFE082", width=2, dash="dot")), **book_lines}
+        book_lines = {(existing_name if k == "Existing Positions" else k): v for k, v in book_lines.items()}
         # draw wide translucent hedge line first so the others stay visible on top
         order = sorted(book_lines, key=lambda n: 0 if "Delta Hedge" in n else 1)
 
         st.markdown("#### Portfolio Payoff at Expiry")
         c_sel2, c_lay2 = st.columns([3, 1])
-        default_book = [n for n in book_lines if n in ("Existing Positions", "Existing + New Legs")]
+        default_book = [n for n in book_lines if n in (existing_name, "Existing + New Legs")]
         # the available line names change when the builder legs change, so the widget key tracks that
         book_sel = c_sel2.multiselect("Lines to show", list(book_lines.keys()), default=default_book,
-                                      key=f"book_lines_{'new' if new_comps else 'solo'}")
+                                      key=f"book_lines_{'new' if new_comps else 'solo'}_{'stk' if stock_held and held_opts else 'x'}")
         book_layout = c_lay2.radio("Layout", ["Single chart", "Stacked panels"], key="book_layout", horizontal=True)
 
         book_strikes = sorted({c["k"] for c in held_comps + new_comps if c["kind"] != "stock"})
@@ -790,8 +809,11 @@ if ticker:
         book_series = [{"name": n, "comps": book_lines[n][0], "y": payoff_of(book_lines[n][0], book_x), **book_lines[n][1]}
                        for n in order if n in book_sel]
         render_payoff_chart(book_x, book_series, book_layout, S, book_strikes, "book_chart")
+        if stock_held:
+            st.caption(f"Shares are valued at the expiry price on the x-axis against your average price of "
+                       f"\\${stock_held[0]['entry']:,.2f}.")
         if book_series:
             st.markdown("##### Breakevens & Risk at Expiry")
             stats_table(book_series, S)
-    elif n_held > 0 and not held_missing_px:
-        st.info("Set a position's Quantity > 0 and enter your entry price to plot your portfolio.")
+    elif not held_missing_px:
+        st.info("Enter shares you hold and/or an option position (Quantity > 0 plus your entry price) to plot your portfolio.")
