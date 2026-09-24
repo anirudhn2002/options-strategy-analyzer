@@ -674,7 +674,8 @@ if ticker:
     st.divider()
     st.markdown("### My Existing Positions")
     st.caption("Enter positions you already hold at the price you actually traded them. The expiry payoff uses "
-               "your fill prices, not today's quotes. Same expiry as selected above, per-option basis. "
+               "your fill prices, not today's quotes. Same expiry as selected above. Option quantities are contracts "
+               "and P&L is on a per-share premium basis. Shares are entered as your real count and divided by 100. "
                "The combined lines add the new legs from the builder above (priced at today's bid/ask).")
 
     held_comps, held_missing_px = [], []
@@ -683,10 +684,12 @@ if ticker:
 
     st.markdown("##### Underlying I already hold")
     u1, u2, u3 = st.columns([1, 1, 2])
-    u_shares = u1.number_input(
-        "Shares held (negative = short)", value=0.0, step=0.05, format="%.4f", key="held_stock_shares",
-        help="Per-option basis, same units as Hedge Shares (0.5 = 50 shares per contract). "
-             "Positive = long stock, negative = short stock.")
+    MULTIPLIER = 100  # shares per option contract
+    u_count = u1.number_input(
+        "Total shares held (actual count, negative = short)", value=0, step=1, key="held_stock_count",
+        help="Enter your real share count, e.g. 300. It is divided by 100 internally so it lines up with "
+             "option quantities, which are counted in contracts on a per-share premium basis.")
+    u_shares = u_count / MULTIPLIER  # per-option basis, same units as everything else
     u_px = u2.number_input("Average price (per share)", min_value=0.0, value=None, step=0.01, format="%.2f",
                            key="held_stock_px", placeholder="your average price")
     stock_held = []
@@ -697,9 +700,10 @@ if ticker:
             stock_held = [stock_comp(u_shares, u_px)]
             held_delta += u_shares
             held_open_pnl += u_shares * (S - u_px)
-            u3.metric("Shares Open P&L (at spot)", f"${u_shares * (S - u_px):,.2f}",
-                      help="Marked at today's spot. At expiry the shares are worth the expiry price, "
-                           "which is what the chart below plots.")
+            u3.metric("Shares Open P&L (per-option basis)", f"${u_shares * (S - u_px):,.2f}",
+                      help=f"Your {u_count:,} shares ÷ 100 = {u_shares:g} per-option units, marked at today's spot. "
+                           f"Actual dollar P&L: ${u_count * (S - u_px):,.2f}. At expiry the shares are worth the "
+                           "expiry price, which is what the chart below plots.")
 
     st.markdown("##### Options I already hold")
     n_held = st.number_input("How many existing option positions?", min_value=0, value=1, step=1, key="held_n")
@@ -766,9 +770,12 @@ if ticker:
         h2.metric("Net Delta (Existing, incl. shares)", f"{held_delta:.4f}")
         h3.metric("Net Delta (Existing + New)", f"{book_delta:.4f}")
         h4.metric("Hedge Shares (Existing + New)", f"{book_hedge:.4f}")
+        h4.caption(f"≈ {book_hedge * MULTIPLIER:,.0f} actual shares to buy/sell (+ buy, − sell)")
         book_custom = h5.number_input("Custom shares for combined book", value=0.0, step=0.05, format="%.4f",
                                       key="book_custom_shares",
-                                      help="Per-option basis, bought or sold at today's spot. Positive = long.")
+                                      help="Per-option basis (same units as Hedge Shares), bought or sold at "
+                                           "today's spot. Positive = long.")
+        h5.caption(f"≈ {book_custom * MULTIPLIER:,.0f} actual shares")
         if held_iv_issue:
             st.caption(f"⚠️ Position(s) {', '.join(map(str, held_iv_issue))}: no usable IV, so delta for those is treated as 0.")
 
