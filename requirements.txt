@@ -1,6 +1,8 @@
-streamlit
-yfinance
+streamlit>=1.50
+yfinance>=1.0
 scipy
 numpy
-plotly
+pandas
+plotly>=5.21
 streamlit-autorefresh
+tzdata
